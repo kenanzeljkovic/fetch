@@ -11,7 +11,9 @@
  *            noteTarget is a polymorphic ("morph") relation on Twenty's side — targetPersonId,
  *            targetCompanyId, and targetOpportunityId all live on the same object, confirmed via
  *            GET /rest/metadata/objects?filter=nameSingular[eq]:noteTarget&depth=2.
- *            The noteTarget is what places the note on that exact person's timeline.
+ *            The noteTarget is what places the note on that exact person's timeline: Twenty creates the
+ *            "linked note" timelineActivity (targetPersonId = the person) itself when the noteTarget is
+ *            created — confirmed against a live workspace — so Fetch must not create one too.
  *
  * Twenty's REST API is generated from each workspace's schema, so this module reads
  * defensively (phones/emails composites vs. older flat fields) and falls back from
@@ -185,18 +187,23 @@ export function buildNoteBody(i: CallNoteInput) {
   const outcome = blocked ? 'Blocked by Fetch Guard' : i.disposition ? DISPOSITION_LABEL[i.disposition] ?? i.disposition : 'n/a';
   const title = `Outbound call via Fetch — ${outcome}`;
   const phone = (e164: string | null) => (e164 ? `${formatForDisplay(e164)} (${e164})` : 'n/a');
+  // Every field is always present (n/a when unknown) so a missing value is visible, not silently dropped.
   const lines = [
     '**Outbound call via Fetch**', '',
     `Contact: ${i.contactName}`,
-    `Phone: ${phone(i.phoneNumber)}`,
+    `Phone called: ${phone(i.phoneNumber)}`,
     `Caller ID: ${phone(i.callerId)}`,
     `Rep: ${i.repEmail || 'unknown'}`,
     `Duration: ${m}m ${s}s`,
     `Disposition: ${outcome}`,
   ];
   if (blocked) lines.push(`Blocked by Fetch Guard: ${blocked.map((r) => BLOCKED_LABEL[r] ?? r).join('; ')}`);
-  if (i.notes && i.notes.trim()) lines.push('', '**Notes**', i.notes.trim());
-  lines.push('', `Telnyx Call ID: ${i.telnyxCallId ?? 'n/a'}`, `Date: ${date}`, `Timestamp: ${i.date.toISOString()}`);
+  lines.push(
+    `Telnyx Call ID: ${i.telnyxCallId ?? 'n/a'}`,
+    `Date: ${date}`,
+    `Timestamp: ${i.date.toISOString()}`,
+    '', '**Notes**', i.notes && i.notes.trim() ? i.notes.trim() : '(none)',
+  );
   const markdown = lines.join('\n');
   return { title, markdown };
 }
@@ -220,9 +227,19 @@ export async function logCallNote(i: CallNoteInput): Promise<string> {
   if (!note?.id) throw new HttpError(502, 'Twenty created the note but returned no ID.', 'TWENTY_API');
 
   const targetField = i.target.objectType === 'company' ? 'targetCompanyId' : 'targetPersonId';
-  const target = unwrap(await request('/noteTargets', { method: 'POST', body: { noteId: note.id, [targetField]: i.target.recordId } }));
-  // If Twenty ignored the target field, the note exists but shows on no record.
-  console.log(`[fetch:log] Twenty POST /noteTargets ${JSON.stringify({ noteTargetId: target?.id ?? null, noteId: target?.noteId ?? null, [targetField]: target?.[targetField] ?? null, expected: i.target.recordId })}`);
+  let target: any;
+  try {
+    target = unwrap(await request('/noteTargets', { method: 'POST', body: { noteId: note.id, [targetField]: i.target.recordId } }));
+    console.log(`[fetch:log] Twenty POST /noteTargets ${JSON.stringify({ noteTargetId: target?.id ?? null, noteId: target?.noteId ?? null, [targetField]: target?.[targetField] ?? null, expected: i.target.recordId })}`);
+    // If Twenty ignored the target field, the note exists but sits on no record's timeline. That is a failure, not a success.
+    if (!target?.id || (target[targetField] != null && target[targetField] !== i.target.recordId)) {
+      throw new HttpError(502, `Twenty did not attach the note to the ${i.target.objectType} record.`, 'TWENTY_API');
+    }
+  } catch (e) {
+    // Don't leave an orphan note behind: the retry creates a fresh note + target.
+    await request(`/notes/${encodeURIComponent(note.id)}`, { method: 'DELETE' }).catch((d) => console.error(`[fetch:log] could not delete orphan note ${note.id}: ${d.message}`));
+    throw e;
+  }
   return note.id;
 }
 
