@@ -89,7 +89,10 @@ export default function EmbedApp() {
   const callRef = useRef<CallRecord | null>(null);
   const notesRef = useRef('');
   const repRef = useRef('');
-  const callerIdRef = useRef<string | null>(null);
+  // Refs, not state: a click-to-call can arrive in the same tick as FETCH_INIT, before any re-render.
+  const pickedRef = useRef<string | null>(null);
+  const repDefaultRef = useRef<string | null>(null);
+  const numbersReq = useRef<Promise<{ defaultNumber: string; numbers: TelnyxNumber[] }> | null>(null);
   const phaseStartRef = useRef<number | null>(null);
   const endedRef = useRef(false);
   const notesTimer = useRef<number | null>(null);
@@ -128,6 +131,12 @@ export default function EmbedApp() {
       dialerPromise.current = p;
     }
     return dialerPromise.current;
+  };
+
+  /** The rep's pick, else their saved default (if it's still on the account), else TELNYX_PHONE_NUMBER. */
+  const chooseCallerId = (list: TelnyxNumber[], fallback: string | null, picked = pickedRef.current, repDefault = repDefaultRef.current) => {
+    const ours = (n: string | null) => !!n && list.some((x) => x.phoneNumber === n);
+    return (ours(picked) && picked) || (ours(repDefault) && repDefault) || fallback;
   };
 
   const loadStats = () => { api.statsToday(repRef.current || null).then(setStats).catch(() => { /* header stats are non-critical */ }); };
@@ -255,15 +264,18 @@ export default function EmbedApp() {
     setCurrent(target);
     setView('call');
     setCallState('checking');
-    trace('POST /api/calls request', { twenty: target.twenty, phone: target.phone, repEmail: repRef.current || null });
     try {
+      // Wait for the account's numbers (fetched on mount) so the rep's default is honoured on the first call too.
+      const opts = await (numbersReq.current ?? Promise.reject()).catch(() => null);
+      const callerId = opts ? chooseCallerId(opts.numbers, opts.defaultNumber) : null;
+      trace('POST /api/calls request', { twenty: target.twenty, phone: target.phone, callerId, repEmail: repRef.current || null });
       const r = await api.createCall({
         twenty: target.twenty,
         contactName: target.name || target.phone,
         phoneNumber: target.phone,
         sessionId,
         repEmail: repRef.current || null,
-        callerId: callerIdRef.current,
+        callerId,
       });
       trace('POST /api/calls response', { callId: r.call.id, twentyContactId: r.call.twentyContactId, twentyObjectType: r.call.twentyObjectType, contact: r.contact ?? null });
       setCall(r.call);
@@ -307,7 +319,8 @@ export default function EmbedApp() {
       case 'FETCH_INIT':
         dialerHost.current!.resolve(m.dialerHost === 'extension' ? 'extension' : 'page'); // later INITs change nothing here
         repRef.current = String(m.repEmail || '').trim().toLowerCase();
-        setRepDefaultNumber(typeof m.defaultCallerId === 'string' && m.defaultCallerId ? m.defaultCallerId : null);
+        repDefaultRef.current = typeof m.defaultCallerId === 'string' && m.defaultCallerId ? m.defaultCallerId : null;
+        setRepDefaultNumber(repDefaultRef.current);
         if (m.theme === 'light' || m.theme === 'dark') setTheme(m.theme);
         loadStats();
         break;
@@ -331,7 +344,8 @@ export default function EmbedApp() {
     let cancelled = false;
     const off = onParentMessage((m) => handlerRef.current(m));
     sendToParent({ type: 'FETCH_READY' });
-    api.telnyxNumbers().then(
+    numbersReq.current = api.telnyxNumbers();
+    numbersReq.current.then(
       (r) => { if (!cancelled) { setNumbers(r.numbers); setServerDefaultNumber(r.defaultNumber); } },
       (e) => trace('caller ID list unavailable, using the server default', { error: errMsg(e, 'unknown') }),
     );
@@ -415,10 +429,7 @@ export default function EmbedApp() {
     placeCall({ id: null, objectType: null, name: null, company: null, phone: e164, twenty: null });
   };
 
-  // The rep's pick, else their saved default (if it's still on the account), else TELNYX_PHONE_NUMBER.
-  const isOurs = (n: string | null) => !!n && numbers.some((x) => x.phoneNumber === n);
-  const selectedNumber = (isOurs(pickedNumber) && pickedNumber) || (isOurs(repDefaultNumber) && repDefaultNumber) || serverDefaultNumber;
-  callerIdRef.current = selectedNumber;
+  const selectedNumber = chooseCallerId(numbers, serverDefaultNumber, pickedNumber, repDefaultNumber);
   const callerIdOptions: CallerIdOption[] = numbers.map((n) => ({
     value: n.phoneNumber,
     label: `${formatPhone(n.phoneNumber)}${n.phoneNumber === serverDefaultNumber ? ' (default)' : ''}`,
@@ -441,7 +452,7 @@ export default function EmbedApp() {
       contact={current}
       callerId={shownCallerId}
       callerIdOptions={callerIdOptions}
-      onCallerIdChange={setPickedNumber}
+      onCallerIdChange={(n) => { pickedRef.current = n; setPickedNumber(n); }}
       callState={callState}
       seconds={seconds}
       blockedDetail={blockedDetail}
