@@ -7,6 +7,11 @@ export type CallStatus =
   | 'failed'      // Telnyx / browser error
   | 'blocked';    // refused by Fetch Guard before dialing (audit record)
 
+export type RecordingStatus =
+  | 'recording'   // record_start accepted by Telnyx
+  | 'saved'       // call.recording.saved received and the mp3 stored
+  | 'failed';     // record_start refused, or the download failed
+
 export type Disposition = 'connected' | 'no_answer' | 'voicemail' | 'busy' | 'wrong_number' | 'do_not_call' | 'other';
 
 export const DISPOSITIONS: Disposition[] = ['connected', 'no_answer', 'voicemail', 'busy', 'wrong_number', 'do_not_call', 'other'];
@@ -31,6 +36,8 @@ export interface CallRecord {
   sessionId: string | null;    // browser session that placed the call
   repEmail: string | null;     // who placed (or attempted) the call
   blockedReasons: string[] | null; // Guard reason codes when status === 'blocked'
+  recordingStatus?: RecordingStatus | null; // null/absent = not recorded
+  recordingUrl?: string | null;    // served path (/api/recordings/<id>.mp3), set once recording started
   createdAt: string;
   updatedAt: string;
 }

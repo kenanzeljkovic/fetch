@@ -4,11 +4,11 @@ import { CallRecord, CallStore } from './types';
 const COLS = [
   'id', 'twenty_contact_id', 'twenty_object_type', 'contact_name', 'phone_number', 'caller_id', 'telnyx_call_id', 'status', 'disposition',
   'notes', 'started_at', 'ended_at', 'duration_seconds', 'twenty_note_id', 'logged_at', 'last_log_error',
-  'session_id', 'rep_email', 'blocked_reasons', 'created_at', 'updated_at',
+  'session_id', 'rep_email', 'blocked_reasons', 'recording_status', 'recording_url', 'created_at', 'updated_at',
 ];
 
 /** Kept in sync with the ALTER TABLE lines in db/schema.sql. */
-const ADDED_COLUMNS = ['twenty_object_type TEXT', 'caller_id TEXT'];
+const ADDED_COLUMNS = ['twenty_object_type TEXT', 'caller_id TEXT', 'recording_status TEXT', 'recording_url TEXT'];
 
 const toSnake = (k: string) => k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
 const toCamel = (k: string) => k.replace(/_([a-z])/g, (_, c) => c.toUpperCase());

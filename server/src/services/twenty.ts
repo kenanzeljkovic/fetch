@@ -162,6 +162,7 @@ export interface CallNoteInput {
   blockedReasons: string[] | null;
   notes: string | null;
   telnyxCallId: string | null;
+  recordingUrl?: string | null;
   date: Date;
 }
 
@@ -200,6 +201,7 @@ export function buildNoteBody(i: CallNoteInput) {
   if (blocked) lines.push(`Blocked by Fetch Guard: ${blocked.map((r) => BLOCKED_LABEL[r] ?? r).join('; ')}`);
   lines.push(
     `Telnyx Call ID: ${i.telnyxCallId ?? 'n/a'}`,
+    `Recording: ${i.recordingUrl ? `[Listen](${i.recordingUrl})` : 'none'}`,
     `Date: ${date}`,
     `Timestamp: ${i.date.toISOString()}`,
     '', '**Notes**', i.notes && i.notes.trim() ? i.notes.trim() : '(none)',
