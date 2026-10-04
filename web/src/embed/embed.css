@@ -171,6 +171,8 @@
 .fd-logstatus { font-size: 12px; margin: -6px 0 12px; color: var(--muted); }
 .fd-logstatus[data-state="logged"] { color: var(--green); }
 .fd-logstatus[data-state="failed"] { color: var(--red); }
+.fd-logstatus { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.fd-logbtn { margin-left: auto; }
 .fd-error-block { margin: 0 0 12px; }
 .fd-notes:disabled { opacity: 0.6; }
 .fd-chip[data-on="1"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }

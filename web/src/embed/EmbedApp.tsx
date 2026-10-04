@@ -94,6 +94,7 @@ export default function EmbedApp() {
   const endedRef = useRef(false);
   const notesTimer = useRef<number | null>(null);
   const confirmTimer = useRef<number | null>(null);
+  const savedOutcomeRef = useRef<Disposition | null>(null); // outcome already on the server record (picked mid-call)
   const dialerPromise = useRef<Promise<Dialer> | null>(null);
   // Settled by the first FETCH_INIT: whether Telnyx runs in the extension or in this iframe.
   const dialerHost = useRef<{ promise: Promise<DialerHost>; resolve: (h: DialerHost) => void } | null>(null);
@@ -139,12 +140,19 @@ export default function EmbedApp() {
 
   /** Clears the previous call from the panel. Its record stays in the store (unlogged if no outcome was picked). */
   const resetCall = () => {
+    // A notes autosave still waiting on its debounce belongs to the call being cleared: send it now.
+    if (notesTimer.current) {
+      window.clearTimeout(notesTimer.current);
+      notesTimer.current = null;
+      const prev = callRef.current;
+      if (prev && !prev.loggedAt) api.saveNotes(prev.id, notesRef.current).catch(() => { /* the record stays unlogged; best effort */ });
+    }
     if (callRef.current) setNotes(''); // notes typed before the first dial carry over; a finished call's do not
-    if (notesTimer.current) { window.clearTimeout(notesTimer.current); notesTimer.current = null; }
     if (confirmTimer.current) { window.clearTimeout(confirmTimer.current); confirmTimer.current = null; }
     setCall(null);
     endedRef.current = false;
     phaseStartRef.current = null;
+    savedOutcomeRef.current = null;
     setError(null); setBlockedDetail([]); setOutcome(null); setConfirmOutcome(null); setLogStatus(null); setSeconds(0);
     setCallState('idle');
   };
@@ -159,23 +167,18 @@ export default function EmbedApp() {
     }, 600);
   };
 
-  /** Notes → disposition → note in Twenty (or local-only for a manual dial). Idempotent on the server. */
+  /**
+   * One request: the notes on screen + the outcome go with POST /log, which saves them onto the record
+   * and then writes the note (or saves locally for a manual dial). Idempotent on the server.
+   */
   const logCall = async (callId: string, disposition: Disposition | null) => {
     const stillCurrent = () => callRef.current?.id === callId;
+    const notes = notesRef.current;
     setLogStatus({ state: 'logging', message: 'Logging…' });
-    trace('log start', { callId, disposition, twentyContactId: callRef.current?.twentyContactId ?? null, notesLength: notesRef.current.length });
+    trace('log start', { callId, disposition, twentyContactId: callRef.current?.twentyContactId ?? null, notesLength: notes.length });
     try {
-      if (notesTimer.current) { window.clearTimeout(notesTimer.current); notesTimer.current = null; }
-      await api.saveNotes(callId, notesRef.current).then(
-        (r) => trace('notes saved', { callId, savedLength: r.call.notes?.length ?? 0 }),
-        (e) => trace('notes save FAILED (continuing)', { callId, error: errMsg(e, 'unknown'), status: (e as ApiError)?.status }),
-      );
-      if (disposition) {
-        const r = await api.setDisposition(callId, disposition);
-        trace('disposition saved', { callId, disposition: r.call.disposition, addedToDnc: r.addedToDnc });
-        if (stillCurrent()) setCall(r.call);
-      }
-      const r = await api.logCall(callId);
+      if (notesTimer.current) { window.clearTimeout(notesTimer.current); notesTimer.current = null; } // superseded by the log request
+      const r = await api.logCall(callId, { notes, disposition });
       trace('POST /log response', {
         callId,
         twentyNoteId: r.call.twentyNoteId,
@@ -184,14 +187,20 @@ export default function EmbedApp() {
         alreadyLogged: !!r.alreadyLogged,
         mock: !!r.mock,
         lastLogError: r.call.lastLogError,
+        notesLength: r.call.notes?.length ?? 0,
       });
       loadStats();
       if (!stillCurrent()) return;
       setCall(r.call);
-      const dnc = disposition === 'do_not_call' ? ' Number added to Do Not Call.' : '';
-      setLogStatus(r.noContact
-        ? { state: 'local', message: `Saved in Fetch. This number isn't a Twenty record, so no note was written.${dnc}` }
-        : { state: 'logged', message: `Logged to Twenty${r.mock ? ' (mock)' : ''}.${dnc}` });
+      const dnc = r.call.disposition === 'do_not_call' ? ' Number added to Do Not Call.' : '';
+      if (r.noContact) {
+        setLogStatus({ state: 'local', message: `Saved in Fetch. This number isn't a Twenty record, so no note was written.${dnc}` });
+      } else if (r.call.twentyNoteId) {
+        // Only a note id from the server counts as logged.
+        setLogStatus({ state: 'logged', message: `Logged to Twenty ✓${r.mock ? ' (mock)' : ''}${dnc}` });
+      } else {
+        setLogStatus({ state: 'failed', message: 'The server did not confirm a Twenty note. Pick an outcome to retry.' });
+      }
     } catch (e) {
       trace('log FAILED', { callId, error: errMsg(e, 'unknown'), status: (e as ApiError)?.status, code: (e as ApiError)?.code, body: (e as ApiError)?.body });
       if (stillCurrent()) setLogStatus({ state: 'failed', message: `${errMsg(e, 'Could not log the call.')} Pick an outcome to retry.` });
@@ -220,9 +229,10 @@ export default function EmbedApp() {
         if (e.error) setError(e.error);
         const status = e.state === 'failed' ? 'failed' : e.neverConnected ? 'no-answer' : 'completed';
         setCallState('ended');
+        const where = cur.twentyContactId ? 'log this call to Twenty' : 'save this call in Fetch';
         setLogStatus((s) => s ?? {
           state: 'pending',
-          message: cur.twentyContactId ? 'Pick an outcome to log this call to Twenty.' : 'Pick an outcome to save this call in Fetch.',
+          message: savedOutcomeRef.current ? `Outcome saved. Add notes, then ${where}.` : `Pick an outcome to ${where}.`,
         });
         // Pre-select the obvious outcome (same as the standalone app); nothing is logged until the rep clicks one.
         setOutcome((d) => d ?? (status === 'completed' ? 'connected' : status === 'no-answer' ? 'no_answer' : null));
@@ -372,8 +382,14 @@ export default function EmbedApp() {
     if (confirmTimer.current) { window.clearTimeout(confirmTimer.current); confirmTimer.current = null; }
     setConfirmOutcome(null);
     setOutcome(d);
-    // During the call a click only pre-selects; the note is written once the call is over.
-    if (stateRef.current === 'ended' || stateRef.current === 'blocked') logCall(cur.id, d);
+    if (stateRef.current === 'ended' || stateRef.current === 'blocked') { logCall(cur.id, d); return; }
+    // During the call: save the outcome on the record now (with the notes so far), so it survives even if
+    // the rep never comes back to this call. The Twenty note is written once the call is over.
+    savedOutcomeRef.current = null;
+    api.setDisposition(cur.id, d, notesRef.current).then(
+      (r) => { trace('disposition saved mid-call', { callId: cur.id, disposition: r.call.disposition }); if (callRef.current?.id === cur.id) savedOutcomeRef.current = d; },
+      (e) => { if (callRef.current?.id === cur.id) setError(`The outcome did not save: ${errMsg(e, 'unknown error')}`); },
+    );
   };
 
   const onSelectQueue = (item: QueueItem) => {
@@ -439,6 +455,7 @@ export default function EmbedApp() {
       outcomesDisabled={!call || callState === 'checking' || logLocked}
       confirmOutcome={confirmOutcome}
       logStatus={logStatus}
+      onLogOutcome={outcome && logStatus?.state === 'pending' && call ? () => logCall(call.id, outcome) : undefined}
       onCall={() => { if (current) placeCall(current); }}
       onHangup={() => { dialerPromise.current?.then((d) => d.hangup()).catch(() => { /* nothing to hang up */ }); }}
       manualDigits={manualDigits}

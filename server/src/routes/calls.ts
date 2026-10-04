@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config';
-import { getStore, DISPOSITIONS, CallStatus, Disposition } from '../store';
+import { getStore, DISPOSITIONS, CallRecord, CallStatus, Disposition } from '../store';
 import { formatForDisplay, isE164, toE164 } from '../lib/phone';
 import { HttpError } from '../lib/errors';
 import { Contact, getContact, logCallNote, MOCK_CONTACTS } from '../services/twenty';
@@ -15,6 +15,25 @@ const trace = (step: string, data: Record<string, unknown>) => console.log(`[fet
 const last4 = (p: string | null | undefined) => (p ? `…${String(p).slice(-4)}` : null);
 
 const STATUSES: CallStatus[] = ['initiated', 'calling', 'connected', 'completed', 'no-answer', 'failed'];
+const MAX_NOTES = 4000;
+
+/**
+ * Optional { notes, disposition } carried on /disposition and /log, so the outcome and the notes the
+ * rep sees are saved in the same request that uses them — never left to an earlier autosave that may
+ * have failed. Absent fields leave the record as it is.
+ */
+function outcomePatch(body: any): Partial<CallRecord> {
+  const patch: Partial<CallRecord> = {};
+  if (body?.notes !== undefined) {
+    if (body.notes !== null && typeof body.notes !== 'string') throw new HttpError(400, 'notes must be a string.', 'BAD_REQUEST');
+    patch.notes = body.notes ? body.notes.slice(0, MAX_NOTES) : '';
+  }
+  if (body?.disposition !== undefined && body.disposition !== null) {
+    if (!DISPOSITIONS.includes(body.disposition)) throw new HttpError(400, `disposition must be one of ${DISPOSITIONS.join(', ')}`, 'BAD_REQUEST');
+    patch.disposition = body.disposition as Disposition;
+  }
+  return patch;
+}
 
 /**
  * Embed calls name the exact Twenty record they were placed from: { objectType, recordId }.
@@ -150,20 +169,24 @@ callsRouter.post('/api/calls/:id/notes', async (req, res, next) => {
     const cur = await store.get(req.params.id);
     if (!cur) throw new HttpError(404, 'Call not found.', 'CALL_NOT_FOUND');
     if (cur.twentyNoteId) throw new HttpError(409, 'This call is already logged to Twenty; notes can no longer be changed.', 'ALREADY_LOGGED');
-    const notes = typeof req.body?.notes === 'string' ? req.body.notes.slice(0, 4000) : '';
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes.slice(0, MAX_NOTES) : '';
     res.json({ call: await store.update(cur.id, { notes }) });
   } catch (e) { next(e); }
 });
 
+/** Body { disposition, notes? }. Allowed during the call too, so an outcome picked mid-call is never lost. */
 callsRouter.post('/api/calls/:id/disposition', async (req, res, next) => {
   try {
     const { disposition } = req.body ?? {};
     if (!DISPOSITIONS.includes(disposition)) throw new HttpError(400, `disposition must be one of ${DISPOSITIONS.join(', ')}`, 'BAD_REQUEST');
+    const patch = outcomePatch(req.body);
     const store = getStore();
     const cur = await store.get(req.params.id);
     if (!cur) throw new HttpError(404, 'Call not found.', 'CALL_NOT_FOUND');
     if (cur.twentyNoteId) throw new HttpError(409, 'This call is already logged to Twenty; its disposition can no longer be changed.', 'ALREADY_LOGGED');
-    const call = await store.update(cur.id, { disposition: disposition as Disposition });
+    if (cur.status === 'blocked') throw new HttpError(409, 'A call blocked by Fetch Guard has no outcome.', 'BLOCKED');
+    const call = await store.update(cur.id, patch);
+    trace('POST /disposition saved', { callId: cur.id, disposition: call.disposition, notesLength: call.notes?.length ?? 0 });
     // "Do Not Call" is a compliance event, not just a label: the number goes on the internal DNC list immediately.
     if (disposition === 'do_not_call') await addToDnc(cur.phoneNumber);
     res.json({ call, addedToDnc: disposition === 'do_not_call' });
@@ -174,12 +197,22 @@ callsRouter.post('/api/calls/:id/disposition', async (req, res, next) => {
  * Write the call to Twenty as a Note on the ORIGINAL contact ID.
  * Idempotent: a second call returns the existing note instead of creating a duplicate.
  * On failure the record keeps everything needed to retry (and stores the error).
+ * Body (optional): { notes, disposition } — saved onto the record first, so the note carries exactly
+ * what the rep had on screen when they logged.
  */
 callsRouter.post('/api/calls/:id/log', async (req, res, next) => {
   try {
     const store = getStore();
-    const cur = await store.get(req.params.id);
+    const patch = outcomePatch(req.body);
+    let cur = await store.get(req.params.id);
     if (!cur) throw new HttpError(404, 'Call not found.', 'CALL_NOT_FOUND');
+    if (!cur.twentyNoteId && cur.status === 'blocked') delete patch.disposition; // a blocked attempt is logged as such
+    if (!cur.twentyNoteId && Object.keys(patch).length) {
+      const wasDnc = cur.disposition === 'do_not_call';
+      cur = await store.update(cur.id, patch);
+      // Same compliance side effect as POST /disposition.
+      if (!wasDnc && cur.disposition === 'do_not_call') await addToDnc(cur.phoneNumber);
+    }
     trace('POST /log start', {
       callId: cur.id, status: cur.status, disposition: cur.disposition, twentyObjectType: cur.twentyObjectType,
       twentyContactId: cur.twentyContactId, notesLength: cur.notes?.length ?? 0, twentyNoteId: cur.twentyNoteId,

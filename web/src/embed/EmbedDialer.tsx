@@ -54,6 +54,7 @@ export interface EmbedDialerProps {
   outcomesDisabled?: boolean;
   confirmOutcome?: string | null;          // outcome waiting for its confirming second click
   logStatus?: LogStatus | null;
+  onLogOutcome?: () => void;               // commits the selected outcome (shown while logStatus is pending)
 
   onCall: () => void;
   onHangup: () => void;
@@ -252,6 +253,11 @@ function CallView(p: EmbedDialerProps & { active: boolean }) {
             {p.logStatus && (
               <div className="fd-logstatus" data-state={p.logStatus.state} role={p.logStatus.state === 'failed' ? 'alert' : 'status'}>
                 {p.logStatus.message}
+                {p.onLogOutcome && p.outcome && (
+                  <button type="button" className="fd-btn fd-btn-primary fd-btn-sm fd-logbtn" onClick={p.onLogOutcome}>
+                    {p.contact?.id ? 'Log' : 'Save'} as {p.outcomes.find((o) => o.code === p.outcome)?.label ?? p.outcome}
+                  </button>
+                )}
               </div>
             )}
 

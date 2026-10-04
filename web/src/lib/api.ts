@@ -95,11 +95,14 @@ export const api = {
   addDnc: (phoneNumber: string) => req<{ rules: GuardRules }>('/api/guard/dnc', { method: 'POST', body: JSON.stringify({ phoneNumber }) }),
   updateStatus: (id: string, body: { status: CallStatus; telnyxCallId?: string | null; startedAt?: string; endedAt?: string }) =>
     req<{ call: CallRecord }>(`/api/calls/${id}/status`, { method: 'POST', body: JSON.stringify(body) }),
-  setDisposition: (id: string, disposition: Disposition) =>
-    req<{ call: CallRecord; addedToDnc?: boolean }>(`/api/calls/${id}/disposition`, { method: 'POST', body: JSON.stringify({ disposition }) }),
+  /** notes, when given, is saved in the same request so the record never has an outcome without its notes. */
+  setDisposition: (id: string, disposition: Disposition, notes?: string) =>
+    req<{ call: CallRecord; addedToDnc?: boolean }>(`/api/calls/${id}/disposition`, { method: 'POST', body: JSON.stringify({ disposition, notes }) }),
   saveNotes: (id: string, notes: string) =>
     req<{ call: CallRecord }>(`/api/calls/${id}/notes`, { method: 'POST', body: JSON.stringify({ notes }) }),
-  logCall: (id: string) => req<{ call: CallRecord; alreadyLogged?: boolean; mock?: boolean; noContact?: boolean; message?: string }>(`/api/calls/${id}/log`, { method: 'POST' }),
+  /** Sends the notes and outcome on screen with the log request, so the note never misses them. */
+  logCall: (id: string, outcome: { notes?: string; disposition?: Disposition | null } = {}) =>
+    req<{ call: CallRecord; alreadyLogged?: boolean; mock?: boolean; noContact?: boolean; message?: string }>(`/api/calls/${id}/log`, { method: 'POST', body: JSON.stringify(outcome) }),
   unloggedCalls: () => req<{ calls: CallRecord[] }>('/api/calls?unlogged=true'),
   statsToday: (rep: string | null) =>
     req<{ callsToday: number; connects: number; talkSeconds: number }>(`/api/stats/today${rep ? `?rep=${encodeURIComponent(rep)}` : ''}`),

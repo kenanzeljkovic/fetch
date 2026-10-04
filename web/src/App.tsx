@@ -156,7 +156,7 @@ export default function App() {
   const chooseDisposition = async (d: Disposition) => {
     if (!call) return;
     setDisposition(d); setLogError(null);
-    try { const r = await api.setDisposition(call.id, d); setCallBoth(r.call); }
+    try { const r = await api.setDisposition(call.id, d, notes); setCallBoth(r.call); }
     catch (e) { setLogError(e instanceof ApiError ? e.message : 'Could not save the disposition.'); }
   };
 
@@ -166,15 +166,13 @@ export default function App() {
     if (!call) return;
     setLogging(true); setLogError(null);
     try {
-      // Notes autosave on a debounce; flush any pending save now so Log Call never
-      // races ahead of it and logs to Twenty before the latest notes text has landed.
-      if (notesSaveTimer.current) {
-        window.clearTimeout(notesSaveTimer.current);
-        notesSaveTimer.current = null;
-        await api.saveNotes(call.id, notes).catch(() => { /* logCall below will surface any real problem */ });
-      }
-      const r = await api.logCall(call.id);
-      setCallBoth(r.call); setLogged(true);
+      // The notes and outcome on screen travel with the log request, so a pending or failed
+      // autosave can't leave the Twenty note without them.
+      if (notesSaveTimer.current) { window.clearTimeout(notesSaveTimer.current); notesSaveTimer.current = null; }
+      const r = await api.logCall(call.id, { notes, disposition });
+      setCallBoth(r.call);
+      if (!r.noContact && !r.call.twentyNoteId) throw new Error('The server did not confirm a Twenty note. Try again.');
+      setLogged(true);
       setLoggedNote(r.noContact ? 'No Twenty contact linked — saved locally only' : null);
       loadPending();
       if (disposition === 'do_not_call') loadContacts();
