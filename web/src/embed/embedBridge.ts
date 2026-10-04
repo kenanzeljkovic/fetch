@@ -24,7 +24,7 @@ export interface EmbedContactRef {
 }
 
 export type ParentToEmbed =
-  | { type: 'FETCH_INIT'; repEmail: string; theme: 'light' | 'dark'; twentyOrigin: string; dialerHost?: DialerHost }
+  | { type: 'FETCH_INIT'; repEmail: string; theme: 'light' | 'dark'; twentyOrigin: string; dialerHost?: DialerHost; defaultCallerId?: string }
   | { type: 'FETCH_DIAL'; phone: string; contact: EmbedContactRef | null }
   | { type: 'FETCH_THEME'; theme: 'light' | 'dark' }
   | { type: 'FETCH_OPEN'; view: 'call' | 'manual' }
@@ -36,7 +36,7 @@ export type EmbedToParent =
   | { type: 'FETCH_STATE'; state: CallState; seconds: number; contactName: string }
   | { type: 'FETCH_MINIMIZE' }
   | { type: 'FETCH_CLOSE' }
-  | { type: 'FETCH_DIALER'; id: string; op: DialerOp; destinationNumber?: string };
+  | { type: 'FETCH_DIALER'; id: string; op: DialerOp; destinationNumber?: string; callerNumber?: string };
 
 export function isEmbedded(): boolean {
   return new URLSearchParams(window.location.search).get('embed') === '1' && window.parent !== window;

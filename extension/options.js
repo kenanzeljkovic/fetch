@@ -1,4 +1,4 @@
-const DEFAULTS = { twentyUrl: '', appUrl: 'https://app.fetchdialer.com', repEmail: '', theme: 'auto' };
+const DEFAULTS = { twentyUrl: '', appUrl: 'https://app.fetchdialer.com', repEmail: '', theme: 'auto', defaultCallerId: '' };
 const SCRIPT_ID = 'fetch-twenty-custom';
 const $ = (id) => document.getElementById(id);
 
@@ -31,12 +31,40 @@ async function registerFor(origin) {
   }]);
 }
 
+function fmtPhone(e164) {
+  const d = (e164 || '').replace(/\D/g, '');
+  return d.length === 11 && d[0] === '1' ? `(${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}` : e164;
+}
+
+// Caller ID choices come from the Fetch server (GET /api/telnyx/numbers), which holds the Telnyx key.
+// Needs host permission for the app URL, which Save settings requests.
+async function loadNumbers(appUrl, selected) {
+  const select = $('defaultCallerId');
+  const hint = $('callerIdHint');
+  select.length = 1; // keep "Server default"
+  try {
+    const res = await fetch(`${appUrl.replace(/\/$/, '')}/api/telnyx/numbers`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `The Fetch server answered ${res.status}.`);
+    select.options[0].textContent = body.defaultNumber ? `Server default (${fmtPhone(body.defaultNumber)})` : 'Server default';
+    for (const n of body.numbers || []) select.add(new Option(fmtPhone(n.phoneNumber), n.phoneNumber));
+    hint.textContent = 'The number prospects see. You can still switch it per call in the dialer.';
+    hint.className = 'hint';
+  } catch {
+    hint.textContent = 'Could not load your Telnyx numbers. Check the Fetch app URL and click Save settings.';
+    hint.className = 'hint err';
+  }
+  // A saved number that is no longer on the account falls back to the server default.
+  select.value = [...select.options].some((o) => o.value === selected) ? selected : '';
+}
+
 async function load() {
   const s = await chrome.storage.sync.get(DEFAULTS);
   $('twentyUrl').value = s.twentyUrl || '';
   $('appUrl').value = s.appUrl || DEFAULTS.appUrl;
   $('repEmail').value = s.repEmail || '';
   $('theme').value = s.theme || 'auto';
+  loadNumbers($('appUrl').value, s.defaultCallerId || '');
 }
 
 async function save() {
@@ -44,6 +72,7 @@ async function save() {
   const appUrl = $('appUrl').value.trim() || DEFAULTS.appUrl;
   const repEmail = $('repEmail').value.trim().toLowerCase();
   const theme = $('theme').value;
+  const defaultCallerId = $('defaultCallerId').value;
 
   if (!originOf(appUrl)) return setStatus('Fetch app URL must be a full URL, e.g. https://app.fetchdialer.com', 'err');
   if (twentyUrl && !originOf(twentyUrl)) return setStatus('Twenty URL must be a full URL, e.g. https://crm.yourcompany.com', 'err');
@@ -56,8 +85,9 @@ async function save() {
     if (twentyUrl) origins.push(originOf(twentyUrl) + '/*');
     if (!(await chrome.permissions.request({ origins }))) throw new Error('Chrome permission was not granted, so settings were not saved.');
     if (twentyUrl) await registerFor(originOf(twentyUrl));
-    await chrome.storage.sync.set({ twentyUrl: twentyUrl ? originOf(twentyUrl) : '', appUrl: originOf(appUrl), repEmail, theme });
+    await chrome.storage.sync.set({ twentyUrl: twentyUrl ? originOf(twentyUrl) : '', appUrl: originOf(appUrl), repEmail, theme, defaultCallerId });
     setStatus('Saved. Reload your Twenty tab to see Fetch.', 'ok');
+    loadNumbers(originOf(appUrl), defaultCallerId); // the app URL may have changed, or permission was just granted
   } catch (e) {
     setStatus(e.message || String(e), 'err');
   }

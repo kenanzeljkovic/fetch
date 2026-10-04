@@ -6,6 +6,7 @@ import { formatForDisplay, isE164, toE164 } from '../lib/phone';
 import { HttpError } from '../lib/errors';
 import { Contact, getContact, logCallNote, MOCK_CONTACTS } from '../services/twenty';
 import { addToDnc, checkCall } from '../services/guard';
+import { resolveCallerId } from '../services/telnyx';
 
 export const callsRouter = Router();
 
@@ -46,7 +47,7 @@ async function resolveTwentyRecord(twenty: unknown, e164: string): Promise<Conta
 /** Create a call record before dialing. Normalises the number; refuses to proceed if it can't. */
 callsRouter.post('/api/calls', async (req, res, next) => {
   try {
-    const { twentyContactId, contactName, phoneNumber, sessionId, repEmail, twenty } = req.body ?? {};
+    const { twentyContactId, contactName, phoneNumber, sessionId, repEmail, twenty, callerId } = req.body ?? {};
     if (twenty != null && twentyContactId != null) throw new HttpError(400, 'Send either twenty or twentyContactId, not both.', 'BAD_REQUEST');
     // twentyContactId is optional — a manual dial (typed on the keypad) has no CRM contact behind it.
     if (twentyContactId != null && typeof twentyContactId !== 'string') throw new HttpError(400, 'twentyContactId must be a string.', 'BAD_REQUEST');
@@ -54,9 +55,12 @@ callsRouter.post('/api/calls', async (req, res, next) => {
     const e164 = toE164(phoneNumber);
     if (!e164 || !isE164(e164)) throw new HttpError(400, `"${phoneNumber}" is not a valid phone number, so the call was not placed.`, 'INVALID_PHONE');
 
+    // Caller ID for this call only: the rep's pick if it's an active number on the account, else TELNYX_PHONE_NUMBER.
+    const fromNumber = await resolveCallerId(callerId);
+
     // Fetch Guard: re-read the contact from the source of truth (never trust the browser's copy).
     // Manual dials have no CRM record, so only the phone-based rules (internal DNC, calling hours) apply.
-    trace('POST /api/calls', { twenty: twenty ?? null, twentyContactId: twentyContactId ?? null, phone: last4(e164), repEmail: repEmail ?? null });
+    trace('POST /api/calls', { twenty: twenty ?? null, twentyContactId: twentyContactId ?? null, phone: last4(e164), callerId: last4(fromNumber), repEmail: repEmail ?? null });
     const record = twenty != null ? await resolveTwentyRecord(twenty, e164) : null;
     trace('POST /api/calls record', { resolved: record ? record.id : null, name: record?.name ?? null });
     const contact = record
@@ -74,6 +78,7 @@ callsRouter.post('/api/calls', async (req, res, next) => {
       twentyObjectType: record || twentyContactId ? ('person' as const) : null,
       contactName: record ? record.name : String(contactName || '').trim() || (twentyContactId ? '(no name)' : e164),
       phoneNumber: e164,
+      callerId: fromNumber,
       telnyxCallId: null,
       disposition: null,
       notes: null,
@@ -203,7 +208,7 @@ callsRouter.post('/api/calls/:id/log', async (req, res, next) => {
         target: { objectType: cur.twentyObjectType ?? 'person', recordId: cur.twentyContactId },
         contactName: cur.contactName,
         phoneNumber: cur.phoneNumber,
-        callerId: config.telnyx.phoneNumber || null,
+        callerId: cur.callerId || config.telnyx.phoneNumber || null,
         repEmail: cur.repEmail,
         durationSeconds: cur.durationSeconds ?? 0,
         disposition: cur.disposition,

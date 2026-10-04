@@ -15,7 +15,7 @@ import { MockDialer, TelnyxDialer, type DialEvent, type Dialer } from '../lib/di
 declare const chrome: any;
 
 type Op = 'connect' | 'dial' | 'hangup' | 'tabClosed';
-interface Command { target: 'offscreen'; op: Op; tabId: number; appUrl?: string; destinationNumber?: string }
+interface Command { target: 'offscreen'; op: Op; tabId: number; appUrl?: string; destinationNumber?: string; callerNumber?: string }
 interface Connection { dialer: Dialer; callerNumber: string; mock: boolean }
 
 const MIC_NOT_ENABLED = 'The microphone is not enabled for Fetch. Click the Fetch icon in the Chrome toolbar and choose "Enable microphone".';
@@ -90,13 +90,16 @@ async function handle(cmd: Command): Promise<Record<string, unknown>> {
       if (inCall) throw new Error(cmd.tabId === ownerTabId ? 'A call is already in progress.' : 'A call is already in progress in another Twenty tab.');
       const number = cmd.destinationNumber;
       if (typeof number !== 'string' || !/^\+\d{8,15}$/.test(number)) throw new Error('Not a valid number.');
+      // The server already checked this is one of the account's numbers when it created the call record.
+      const from = cmd.callerNumber;
+      if (from != null && (typeof from !== 'string' || !/^\+\d{8,15}$/.test(from))) throw new Error('Not a valid caller ID.');
       inCall = true; // claim the line before any await so two tabs can't both dial
       clearTimeout(stuckTimer);
       ownerTabId = cmd.tabId;
       try {
         const c = await connect(cmd.appUrl!);
         if (!c.mock && !(await micGranted())) throw new Error(MIC_NOT_ENABLED);
-        await c.dialer.dial(number, emit);
+        await c.dialer.dial(number, emit, from || undefined);
       } catch (e) {
         inCall = false;
         throw e;

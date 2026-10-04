@@ -9,7 +9,7 @@
 //     reimplemented here.
 //
 // PROTOCOL (parent → iframe)
-//   FETCH_INIT   { repEmail, theme, twentyOrigin, dialerHost: 'extension' }
+//   FETCH_INIT   { repEmail, theme, twentyOrigin, dialerHost: 'extension', defaultCallerId }
 //   FETCH_DIAL   { phone, contact: { objectType, recordId, name, company } | null }
 //   FETCH_THEME  { theme }
 //   FETCH_OPEN   { view: 'call' | 'manual' }
@@ -20,7 +20,7 @@
 //   FETCH_STATE  { state, seconds, contactName }   state: idle|checking|blocked|dialing|ringing|connected|ended
 //   FETCH_MINIMIZE {}
 //   FETCH_CLOSE  {}
-//   FETCH_DIALER { id, op: 'connect' | 'dial' | 'hangup', destinationNumber? }
+//   FETCH_DIALER { id, op: 'connect' | 'dial' | 'hangup', destinationNumber?, callerNumber? }
 //
 // Calls run in the extension's offscreen document (offscreen.html), not in the iframe, so the
 // microphone belongs to the extension and Twenty's Permissions-Policy can't block it. This file
@@ -35,7 +35,7 @@
   if (window.__fetchDialerLoaded) return;
   window.__fetchDialerLoaded = true;
 
-  const DEFAULTS = { appUrl: 'https://app.fetchdialer.com', repEmail: '', theme: 'auto' };
+  const DEFAULTS = { appUrl: 'https://app.fetchdialer.com', repEmail: '', theme: 'auto', defaultCallerId: '' };
   const ACTIVE = new Set(['dialing', 'ringing', 'connected']);
 
   const S = {
@@ -277,7 +277,7 @@
     frame.contentWindow.postMessage(msg, S.appOrigin);
   }
   function initMsg() {
-    return { type: 'FETCH_INIT', repEmail: S.settings.repEmail, theme: theme(), twentyOrigin: location.origin, dialerHost: 'extension' };
+    return { type: 'FETCH_INIT', repEmail: S.settings.repEmail, theme: theme(), twentyOrigin: location.origin, dialerHost: 'extension', defaultCallerId: S.settings.defaultCallerId || '' };
   }
 
   const EXTENSION_RELOADED = 'The Fetch extension was updated. Reload this tab to keep calling.';
@@ -285,7 +285,7 @@
     const reply = (r) => post({ ...r, type: 'FETCH_DIALER_RESULT', id: String(m.id || '') });
     try {
       chrome.runtime
-        .sendMessage({ target: 'background', type: 'FETCH_DIALER', op: m.op, destinationNumber: m.destinationNumber })
+        .sendMessage({ target: 'background', type: 'FETCH_DIALER', op: m.op, destinationNumber: m.destinationNumber, callerNumber: m.callerNumber })
         .then((r) => reply(r || { ok: false, error: 'The Fetch extension did not answer.' }), () => reply({ ok: false, error: EXTENSION_RELOADED }));
     } catch {
       reply({ ok: false, error: EXTENSION_RELOADED }); // chrome.runtime is gone once the extension reloads
@@ -425,7 +425,7 @@
     if (area !== 'sync') return;
     for (const k of Object.keys(changes)) S.settings[k] = changes[k].newValue;
     if (changes.theme) applyTheme();
-    if (changes.repEmail && S.ready) post(initMsg());
+    if ((changes.repEmail || changes.defaultCallerId) && S.ready) post(initMsg());
     if (changes.appUrl) showToast('Fetch app URL changed. Reload this tab to use it.');
   });
 })();

@@ -17,6 +17,7 @@ export interface CallRecord {
   twentyObjectType: 'person' | 'company' | null; // which Twenty object twentyContactId points at (null = manual dial; older records: treat as person)
   contactName: string;
   phoneNumber: string;         // E.164
+  callerId: string | null;     // the Telnyx number the call was placed from (null on records older than 0.4)
   telnyxCallId: string | null;
   status: CallStatus;
   disposition: Disposition | null;

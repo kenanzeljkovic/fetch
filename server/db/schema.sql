@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS calls (
   twenty_object_type TEXT,
   contact_name      TEXT NOT NULL,
   phone_number      TEXT NOT NULL,
+  caller_id         TEXT,
   telnyx_call_id    TEXT,
   status            TEXT NOT NULL,
   disposition       TEXT,
@@ -24,6 +25,8 @@ CREATE TABLE IF NOT EXISTS calls (
 
 -- Added in Phase 2 (embed). Idempotent for databases created before the column existed.
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS twenty_object_type TEXT;
+-- Added in 0.4 (per-call caller ID).
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS caller_id TEXT;
 
 CREATE INDEX IF NOT EXISTS calls_contact_idx ON calls (twenty_contact_id);
 CREATE INDEX IF NOT EXISTS calls_unlogged_idx ON calls (created_at DESC) WHERE twenty_note_id IS NULL;

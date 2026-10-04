@@ -54,7 +54,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Twenty tab (content.js) → offscreen
   if (msg.type === 'FETCH_DIALER' && sender.tab && DIALER_OPS.has(msg.op)) {
-    toOffscreen({ op: msg.op, tabId: sender.tab.id, destinationNumber: msg.destinationNumber })
+    toOffscreen({ op: msg.op, tabId: sender.tab.id, destinationNumber: msg.destinationNumber, callerNumber: msg.callerNumber })
       .then(sendResponse, (e) => sendResponse({ ok: false, error: (e && e.message) || String(e) }));
     return true;
   }

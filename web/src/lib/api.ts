@@ -32,6 +32,7 @@ export interface CallRecord {
   twentyObjectType?: 'person' | 'company' | null;
   contactName: string;
   phoneNumber: string;
+  callerId?: string | null;
   telnyxCallId: string | null;
   status: CallStatus;
   disposition: Disposition | null;
@@ -46,6 +47,8 @@ export interface CallRecord {
   blockedReasons: string[] | null;
   createdAt: string;
 }
+
+export interface TelnyxNumber { phoneNumber: string; connectionName: string | null; onDialerConnection: boolean }
 
 export interface Health {
   ok: boolean;
@@ -76,12 +79,15 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   health: () => req<Health>('/api/health'),
   contacts: (rep: string | null) => req<{ contacts: Contact[]; source: string }>(`/api/contacts${rep ? `?rep=${encodeURIComponent(rep)}` : ''}`),
+  telnyxNumbers: () => req<{ defaultNumber: string; numbers: TelnyxNumber[] }>('/api/telnyx/numbers'),
   telnyxToken: () => req<{ token?: string; callerNumber: string; mock?: boolean }>('/api/telnyx/token', { method: 'POST' }),
   createCall: (body: {
     twentyContactId?: string | null;
     /** Embed: the exact Twenty record the call was placed from. The server re-reads it by id. */
     twenty?: { objectType: 'person' | 'company'; recordId: string } | null;
     contactName: string; phoneNumber: string | null; sessionId: string; repEmail: string | null;
+    /** Caller ID for this call only; omitted = TELNYX_PHONE_NUMBER. */
+    callerId?: string | null;
   }) =>
     req<{ call: CallRecord; guard?: GuardResult; contact?: { name: string; company: string | null } }>('/api/calls', { method: 'POST', body: JSON.stringify(body) }),
   guardRules: () => req<{ rules: GuardRules }>('/api/guard/rules'),
@@ -115,4 +121,10 @@ export const sessionId = (() => {
 export const repStore = {
   get: () => { try { return localStorage.getItem('fetch.repEmail') || ''; } catch { return ''; } },
   set: (v: string) => { try { localStorage.setItem('fetch.repEmail', v.trim().toLowerCase()); } catch { /* storage blocked */ } },
+};
+
+/** The rep's default caller ID in the standalone app (the extension keeps its own in chrome.storage.sync). */
+export const callerIdStore = {
+  get: () => { try { return localStorage.getItem('fetch.callerId') || ''; } catch { return ''; } },
+  set: (v: string) => { try { localStorage.setItem('fetch.callerId', v); } catch { /* storage blocked */ } },
 };

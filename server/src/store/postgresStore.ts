@@ -2,10 +2,13 @@ import { Pool } from 'pg';
 import { CallRecord, CallStore } from './types';
 
 const COLS = [
-  'id', 'twenty_contact_id', 'twenty_object_type', 'contact_name', 'phone_number', 'telnyx_call_id', 'status', 'disposition',
+  'id', 'twenty_contact_id', 'twenty_object_type', 'contact_name', 'phone_number', 'caller_id', 'telnyx_call_id', 'status', 'disposition',
   'notes', 'started_at', 'ended_at', 'duration_seconds', 'twenty_note_id', 'logged_at', 'last_log_error',
   'session_id', 'rep_email', 'blocked_reasons', 'created_at', 'updated_at',
 ];
+
+/** Kept in sync with the ALTER TABLE lines in db/schema.sql. */
+const ADDED_COLUMNS = ['twenty_object_type TEXT', 'caller_id TEXT'];
 
 const toSnake = (k: string) => k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
 const toCamel = (k: string) => k.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
@@ -22,12 +25,12 @@ export class PostgresStore implements CallStore {
   private ready: Promise<void>;
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString });
-    // Phase 2 added calls.twenty_object_type. Deploys don't run db:migrate, so add it here
-    // (idempotent) before any query selects it — otherwise every calls query would fail.
+    // Columns added after the first deploy. Deploys don't run db:migrate, so add them here
+    // (idempotent) before any query selects them — otherwise every calls query would fail.
     this.ready = this.pool
-      .query('ALTER TABLE calls ADD COLUMN IF NOT EXISTS twenty_object_type TEXT')
+      .query(ADDED_COLUMNS.map((c) => `ALTER TABLE calls ADD COLUMN IF NOT EXISTS ${c}`).join('; '))
       .then(() => undefined)
-      .catch((e) => console.error(`[store] could not add calls.twenty_object_type — run npm run db:migrate -w server: ${e.message}`));
+      .catch((e) => console.error(`[store] could not add new calls columns — run npm run db:migrate -w server: ${e.message}`));
   }
 
   async create(input: Omit<CallRecord, 'createdAt' | 'updatedAt'>) {

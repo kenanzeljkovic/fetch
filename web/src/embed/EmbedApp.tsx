@@ -15,11 +15,11 @@
  * note goes. Names shown here before the server answers are display-only.
  */
 import { useEffect, useRef, useState } from 'react';
-import { api, ApiError, sessionId, type CallRecord, type Disposition } from '../lib/api';
+import { api, ApiError, sessionId, type CallRecord, type Disposition, type TelnyxNumber } from '../lib/api';
 import type { DialEvent, Dialer } from '../lib/dialer';
 import { startRingback, stopRingback } from '../lib/tones';
 import { DISPOSITIONS } from '../components/CallPanel';
-import EmbedDialer, { formatPhone, type CallState, type EmbedContact, type LogStatus, type QueueItem, type Stats } from './EmbedDialer';
+import EmbedDialer, { formatPhone, type CallerIdOption, type CallState, type EmbedContact, type LogStatus, type QueueItem, type Stats } from './EmbedDialer';
 import { onParentMessage, sendToParent, type DialerHost, type EmbedContactRef, type ParentToEmbed } from './embedBridge';
 import { ExtensionDialer } from './extensionDialer';
 
@@ -59,7 +59,12 @@ export default function EmbedApp() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [view, setView] = useState<'call' | 'manual'>('call');
   const [stats, setStats] = useState<Stats>({ callsToday: 0, connects: 0, talkSeconds: 0 });
-  const [callerId, setCallerId] = useState<string | null>(null);
+  // Caller ID: the account's numbers (GET /api/telnyx/numbers), the rep's default from the extension
+  // settings (FETCH_INIT.defaultCallerId), and the pick for the next call. The server re-checks the pick.
+  const [numbers, setNumbers] = useState<TelnyxNumber[]>([]);
+  const [serverDefaultNumber, setServerDefaultNumber] = useState<string | null>(null);
+  const [repDefaultNumber, setRepDefaultNumber] = useState<string | null>(null);
+  const [pickedNumber, setPickedNumber] = useState<string | null>(null);
 
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [activeQueueId, setActiveQueueId] = useState<string | null>(null);
@@ -84,6 +89,7 @@ export default function EmbedApp() {
   const callRef = useRef<CallRecord | null>(null);
   const notesRef = useRef('');
   const repRef = useRef('');
+  const callerIdRef = useRef<string | null>(null);
   const phaseStartRef = useRef<number | null>(null);
   const endedRef = useRef(false);
   const notesTimer = useRef<number | null>(null);
@@ -114,7 +120,7 @@ export default function EmbedApp() {
         }
         const d = new ExtensionDialer();
         try { await d.ready(); } catch (e) { d.destroy(); throw e; }
-        setCallerId(d.callerNumber);
+        setServerDefaultNumber((n) => n ?? (d.callerNumber || null));
         return d;
       })();
       p.catch(() => { if (dialerPromise.current === p) dialerPromise.current = null; }); // next dial retries
@@ -247,6 +253,7 @@ export default function EmbedApp() {
         phoneNumber: target.phone,
         sessionId,
         repEmail: repRef.current || null,
+        callerId: callerIdRef.current,
       });
       trace('POST /api/calls response', { callId: r.call.id, twentyContactId: r.call.twentyContactId, twentyObjectType: r.call.twentyObjectType, contact: r.contact ?? null });
       setCall(r.call);
@@ -255,7 +262,8 @@ export default function EmbedApp() {
       phaseStartRef.current = Date.now();
       setCallState('dialing');
       const dialer = await getDialer();
-      await dialer.dial(r.call.phoneNumber, onDialEvent);
+      // Dial from the number the server accepted for this call, not whatever the picker shows now.
+      await dialer.dial(r.call.phoneNumber, onDialEvent, r.call.callerId || undefined);
     } catch (e) {
       trace('POST /api/calls error', { error: errMsg(e, 'unknown'), status: (e as ApiError)?.status, code: (e as ApiError)?.code });
       if (e instanceof ApiError && e.code === 'BLOCKED') {
@@ -289,6 +297,7 @@ export default function EmbedApp() {
       case 'FETCH_INIT':
         dialerHost.current!.resolve(m.dialerHost === 'extension' ? 'extension' : 'page'); // later INITs change nothing here
         repRef.current = String(m.repEmail || '').trim().toLowerCase();
+        setRepDefaultNumber(typeof m.defaultCallerId === 'string' && m.defaultCallerId ? m.defaultCallerId : null);
         if (m.theme === 'light' || m.theme === 'dark') setTheme(m.theme);
         loadStats();
         break;
@@ -312,6 +321,10 @@ export default function EmbedApp() {
     let cancelled = false;
     const off = onParentMessage((m) => handlerRef.current(m));
     sendToParent({ type: 'FETCH_READY' });
+    api.telnyxNumbers().then(
+      (r) => { if (!cancelled) { setNumbers(r.numbers); setServerDefaultNumber(r.defaultNumber); } },
+      (e) => trace('caller ID list unavailable, using the server default', { error: errMsg(e, 'unknown') }),
+    );
     dialerHost.current!.promise.then(() => {
       if (cancelled) return;
       getDialer().catch((e) => { if (!cancelled) setError(errMsg(e, 'Could not connect to Telnyx.')); });
@@ -386,6 +399,17 @@ export default function EmbedApp() {
     placeCall({ id: null, objectType: null, name: null, company: null, phone: e164, twenty: null });
   };
 
+  // The rep's pick, else their saved default (if it's still on the account), else TELNYX_PHONE_NUMBER.
+  const isOurs = (n: string | null) => !!n && numbers.some((x) => x.phoneNumber === n);
+  const selectedNumber = (isOurs(pickedNumber) && pickedNumber) || (isOurs(repDefaultNumber) && repDefaultNumber) || serverDefaultNumber;
+  callerIdRef.current = selectedNumber;
+  const callerIdOptions: CallerIdOption[] = numbers.map((n) => ({
+    value: n.phoneNumber,
+    label: `${formatPhone(n.phoneNumber)}${n.phoneNumber === serverDefaultNumber ? ' (default)' : ''}`,
+  }));
+  // While a call is live the (locked) picker shows the number it was actually placed from.
+  const shownCallerId = (ACTIVE.includes(callState) && call?.callerId) || selectedNumber;
+
   const logLocked = logStatus?.state === 'logging' || logStatus?.state === 'logged' || logStatus?.state === 'local';
 
   return (
@@ -399,7 +423,9 @@ export default function EmbedApp() {
       activeQueueId={activeQueueId}
       onSelectQueue={onSelectQueue}
       contact={current}
-      callerId={callerId}
+      callerId={shownCallerId}
+      callerIdOptions={callerIdOptions}
+      onCallerIdChange={setPickedNumber}
       callState={callState}
       seconds={seconds}
       blockedDetail={blockedDetail}

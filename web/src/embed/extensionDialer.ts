@@ -36,7 +36,7 @@ export class ExtensionDialer implements Dialer {
     });
   }
 
-  private request(op: DialerOp, destinationNumber?: string): Promise<Result> {
+  private request(op: DialerOp, destinationNumber?: string, callerNumber?: string): Promise<Result> {
     const id = `${op}-${++this.seq}`;
     return new Promise<Result>((resolve, reject) => {
       const timer = window.setTimeout(() => {
@@ -44,7 +44,7 @@ export class ExtensionDialer implements Dialer {
         reject(new Error('The Fetch extension did not answer. Reload this tab and try again.'));
       }, TIMEOUT_MS[op]);
       this.pending.set(id, { resolve, reject, timer });
-      sendToParent({ type: 'FETCH_DIALER', id, op, destinationNumber });
+      sendToParent({ type: 'FETCH_DIALER', id, op, destinationNumber, callerNumber });
     });
   }
 
@@ -60,10 +60,10 @@ export class ExtensionDialer implements Dialer {
     return this.readyPromise;
   }
 
-  async dial(destinationNumber: string, onEvent: (e: DialEvent) => void) {
+  async dial(destinationNumber: string, onEvent: (e: DialEvent) => void, callerNumber?: string) {
     this.onEvent = onEvent;
     await this.ready();
-    await this.request('dial', destinationNumber);
+    await this.request('dial', destinationNumber, callerNumber);
   }
 
   async hangup() {
