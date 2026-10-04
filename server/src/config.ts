@@ -22,10 +22,15 @@ export const config = {
     connectionId: env.TELNYX_CONNECTION_ID || '',
     phoneNumber: env.TELNYX_PHONE_NUMBER || '',
     credentialId: env.TELNYX_CREDENTIAL_ID || '',
+    publicKey: env.TELNYX_PUBLIC_KEY || '', // verifies webhook signatures (Portal → Keys & Credentials → Public Key)
+    apiBase: strip(env.TELNYX_API_BASE || 'https://api.telnyx.com/v2'), // override only for tests
   },
   databaseUrl: env.DATABASE_URL || '',
-  dataDir: path.resolve(__dirname, '..', 'data'),
-  recordingEnabled: env.ENABLE_CALL_RECORDING === 'true', // reserved, not wired up
+  // Calls/settings JSON and call recordings. On Railway point this at the volume's mount path.
+  dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : path.resolve(__dirname, '..', 'data'),
+  recordingEnabled: env.ENABLE_CALL_RECORDING === 'true',
+  /** Public origin of this server, for recording links in Twenty notes. Empty = taken from the request. */
+  publicUrl: strip(env.PUBLIC_URL || ''),
 };
 
 export const twentyConfigured = () => Boolean(config.twenty.url && config.twenty.apiKey);

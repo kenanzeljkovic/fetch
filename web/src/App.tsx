@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError, repStore, sessionId, type CallRecord, type Contact, type Disposition, type Health } from './lib/api';
+import { api, ApiError, callerIdStore, repStore, sessionId, type CallRecord, type Contact, type Disposition, type Health, type TelnyxNumber } from './lib/api';
 import { MockDialer, TelnyxDialer, type DialEvent, type DialState, type Dialer } from './lib/dialer';
 import { Banner } from './components/Banner';
 import { ContactList } from './components/ContactList';
@@ -14,6 +14,9 @@ export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [rep, setRep] = useState<string>(repStore.get());
+  const [numbers, setNumbers] = useState<TelnyxNumber[]>([]);
+  const [defaultNumber, setDefaultNumber] = useState<string | null>(null);
+  const [callerId, setCallerId] = useState<string>(callerIdStore.get());
 
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [contactsError, setContactsError] = useState<string | null>(null);
@@ -62,6 +65,11 @@ export default function App() {
   }, []);
 
   useEffect(() => { loadHealth(); loadContacts(); loadPending(); }, [loadHealth, loadContacts, loadPending]);
+  useEffect(() => {
+    api.telnyxNumbers().then((r) => { setNumbers(r.numbers); setDefaultNumber(r.defaultNumber); }).catch(() => { /* picker hidden; server default is used */ });
+  }, []);
+  // The saved pick only counts while it is still an active number on the account.
+  const fromNumber = numbers.some((n) => n.phoneNumber === callerId) ? callerId : defaultNumber;
   useEffect(() => () => dialerRef.current?.destroy(), []);
 
   // Ringback tone while dialing — Telnyx doesn't always send early media before the
@@ -108,11 +116,11 @@ export default function App() {
     setDialState('connecting');
     try {
       // 1. Create the server-side record first (normalises the number, refuses if invalid)
-      const { call } = await api.createCall({ twentyContactId: contactId, contactName, phoneNumber: phoneRaw, sessionId, repEmail: rep || null });
+      const { call } = await api.createCall({ twentyContactId: contactId, contactName, phoneNumber: phoneRaw, sessionId, repEmail: rep || null, callerId: fromNumber });
       setCallBoth(call);
-      // 2. Dial through Telnyx from the browser
+      // 2. Dial through Telnyx from the browser, from the caller ID the server accepted
       const dialer = await getDialer();
-      await dialer.dial(call.phoneNumber, handleDialEvent);
+      await dialer.dial(call.phoneNumber, handleDialEvent, call.callerId || undefined);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'BLOCKED') {
         // Guard refused it server-side; the attempt is already stored as an audit record
@@ -148,7 +156,7 @@ export default function App() {
   const chooseDisposition = async (d: Disposition) => {
     if (!call) return;
     setDisposition(d); setLogError(null);
-    try { const r = await api.setDisposition(call.id, d); setCallBoth(r.call); }
+    try { const r = await api.setDisposition(call.id, d, notes); setCallBoth(r.call); }
     catch (e) { setLogError(e instanceof ApiError ? e.message : 'Could not save the disposition.'); }
   };
 
@@ -158,15 +166,13 @@ export default function App() {
     if (!call) return;
     setLogging(true); setLogError(null);
     try {
-      // Notes autosave on a debounce; flush any pending save now so Log Call never
-      // races ahead of it and logs to Twenty before the latest notes text has landed.
-      if (notesSaveTimer.current) {
-        window.clearTimeout(notesSaveTimer.current);
-        notesSaveTimer.current = null;
-        await api.saveNotes(call.id, notes).catch(() => { /* logCall below will surface any real problem */ });
-      }
-      const r = await api.logCall(call.id);
-      setCallBoth(r.call); setLogged(true);
+      // The notes and outcome on screen travel with the log request, so a pending or failed
+      // autosave can't leave the Twenty note without them.
+      if (notesSaveTimer.current) { window.clearTimeout(notesSaveTimer.current); notesSaveTimer.current = null; }
+      const r = await api.logCall(call.id, { notes, disposition });
+      setCallBoth(r.call);
+      if (!r.noContact && !r.call.twentyNoteId) throw new Error('The server did not confirm a Twenty note. Try again.');
+      setLogged(true);
       setLoggedNote(r.noContact ? 'No Twenty contact linked — saved locally only' : null);
       loadPending();
       if (disposition === 'do_not_call') loadContacts();
@@ -196,6 +202,19 @@ export default function App() {
               className="h-8 w-44 rounded-md px-2.5 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2" style={{ border: '1px solid var(--fetch-line)', background: '#fff' }}
             />
           </label>
+          {numbers.length > 1 && (
+            <label className="flex items-center gap-1.5 text-xs text-neutral-600">
+              Call from
+              <select
+                value={fromNumber ?? ''}
+                disabled={busy}
+                onChange={(e) => { setCallerId(e.target.value); callerIdStore.set(e.target.value); }}
+                className="h-8 rounded-md px-2 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50" style={{ border: '1px solid var(--fetch-line)', background: '#fff' }}
+              >
+                {numbers.map((n) => <option key={n.phoneNumber} value={n.phoneNumber}>{n.phoneNumber}{n.phoneNumber === defaultNumber ? ' (default)' : ''}</option>)}
+              </select>
+            </label>
+          )}
           {health?.mode === 'mock' && <span className="rounded-full px-2.5 py-1 text-[11px] font-semibold tracking-wide" style={{ background: '#FDECC8', color: '#7A5A12' }}>MOCK MODE</span>}
           <button type="button" onClick={loadContacts} disabled={loadingContacts || busy} className="h-8 rounded-md px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 hover:bg-black/5 active:bg-black/10" style={{ border: '1px solid var(--fetch-line)', background: '#fff', color: 'var(--fetch-ink)' }}>
             {loadingContacts ? 'Refreshing…' : 'Refresh Contacts'}

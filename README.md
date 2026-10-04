@@ -249,12 +249,15 @@ All responses are JSON. Errors: `{ "error": "<human message>", "code": "<CODE>" 
 | GET | `/api/contacts` | `{ contacts: Contact[], source }` — up to 50 people from Twenty |
 | GET | `/api/contacts/:id` | one contact |
 | POST | `/api/telnyx/token` | `{ token, callerNumber, expiresInSeconds }` (mock mode: `{ mock: true }`) |
-| POST | `/api/calls` | body `{ twentyContactId, contactName, phoneNumber, sessionId?, repEmail? }` → `{ call, guard }` (201). 400 `NO_PHONE` / `INVALID_PHONE`; **403 `BLOCKED`** with `reasons` + stored audit record |
+| POST | `/api/calls` | body `{ twentyContactId, contactName, phoneNumber, sessionId?, repEmail?, callerId? }` (`callerId` must be an active account number, else 400 `INVALID_CALLER_ID`) → `{ call, guard }` (201). 400 `NO_PHONE` / `INVALID_PHONE`; **403 `BLOCKED`** with `reasons` + stored audit record |
 | GET | `/api/calls?unlogged=true` | recent calls; `unlogged=true` filters to ended-but-unlogged |
 | GET | `/api/calls/:id` | one call |
 | POST | `/api/calls/:id/status` | body `{ status, telnyxCallId?, startedAt?, endedAt? }`; computes `durationSeconds` |
-| POST | `/api/calls/:id/disposition` | body `{ disposition }`; 409 `ALREADY_LOGGED` after logging; `do_not_call` also adds the number to the internal DNC list |
-| POST | `/api/calls/:id/log` | writes the note; idempotent (`alreadyLogged: true`); 409 `CALL_ACTIVE` while in progress; 400 `NO_DISPOSITION`; 502 `TWENTY_LOG_FAILED` (retryable) |
+| GET | `/api/telnyx/numbers` | `{ defaultNumber, numbers[] }` — active Telnyx numbers for the caller ID picker |
+| POST | `/api/webhooks/telnyx` | Telnyx webhook; stores the mp3 on `call.recording.saved` |
+| GET | `/api/recordings/:callId.mp3` | the stored recording |
+| POST | `/api/calls/:id/disposition` | body `{ disposition, notes? }`; allowed mid-call; 409 `ALREADY_LOGGED` after logging; `do_not_call` also adds the number to the internal DNC list |
+| POST | `/api/calls/:id/log` | body `{ notes?, disposition? }` saved first, then writes the note; idempotent (`alreadyLogged: true`); 409 `CALL_ACTIVE` while in progress; 400 `NO_DISPOSITION`; 502 `TWENTY_LOG_FAILED` (retryable) |
 
 Call record:
 
@@ -344,7 +347,7 @@ Intentionally **not** implemented:
 - Login / users / roles — single anonymous rep; `/api/telnyx/token` has no auth. Do not expose this deployment publicly without adding authentication first.
 - Multi-subsidiary data separation.
 - Power dialing, parallel dialing, sequences, queues.
-- Call recording. `ENABLE_CALL_RECORDING` is reserved and does nothing (recording needs consent handling and Telnyx connection-level configuration).
+- Recording-consent prompts. `ENABLE_CALL_RECORDING=true` records every answered call; there is no announcement or per-call consent yet, so check the law for the states you call (Florida is all-party consent).
 - Voicemail / answering-machine detection.
 - Inbound calls.
 - Guard is rules-only: no National DNC Registry scrub (needs an FTC subscription + scrub API), no consent capture, no recording-consent prompts, no abandonment pacing — those are V1 (see the blueprint).
@@ -371,4 +374,7 @@ All variables live in `.env` (see `.env.example`).
 | `DATABASE_URL` | optional; PostgreSQL connection string. Empty = JSON file store |
 | `PORT`, `CORS_ORIGINS` | server port; allowed frontend origin(s) in dev |
 | `EMBED_ALLOWED_ORIGINS` | your Twenty origin(s), comma-separated, so the extension's dock can frame Fetch |
-| `ENABLE_CALL_RECORDING` | reserved; does nothing yet |
+| `ENABLE_CALL_RECORDING` | `true` records answered calls (Telnyx `record_start`, mp3, single channel); files land in `DATA_DIR/recordings/` and are linked from the Twenty note |
+| `TELNYX_PUBLIC_KEY` | Telnyx Portal → Keys & Credentials → Public Key; verifies `/api/webhooks/telnyx` signatures. Also set the connection's webhook URL to `https://<fetch>/api/webhooks/telnyx` |
+| `PUBLIC_URL` | optional public origin of the server for recording links (default: taken from the request) |
+| `DATA_DIR` | optional; where the JSON store and recordings live (default `server/data`). On Railway, point it at a volume |

@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config';
-import { getStore, DISPOSITIONS, CallStatus, Disposition } from '../store';
+import { getStore, DISPOSITIONS, CallRecord, CallStatus, Disposition } from '../store';
 import { formatForDisplay, isE164, toE164 } from '../lib/phone';
 import { HttpError } from '../lib/errors';
 import { Contact, getContact, logCallNote, MOCK_CONTACTS } from '../services/twenty';
 import { addToDnc, checkCall } from '../services/guard';
+import { resolveCallerId } from '../services/telnyx';
+import { recordingPath, startRecording } from '../services/recording';
 
 export const callsRouter = Router();
 
@@ -14,6 +16,25 @@ const trace = (step: string, data: Record<string, unknown>) => console.log(`[fet
 const last4 = (p: string | null | undefined) => (p ? `…${String(p).slice(-4)}` : null);
 
 const STATUSES: CallStatus[] = ['initiated', 'calling', 'connected', 'completed', 'no-answer', 'failed'];
+const MAX_NOTES = 4000;
+
+/**
+ * Optional { notes, disposition } carried on /disposition and /log, so the outcome and the notes the
+ * rep sees are saved in the same request that uses them — never left to an earlier autosave that may
+ * have failed. Absent fields leave the record as it is.
+ */
+function outcomePatch(body: any): Partial<CallRecord> {
+  const patch: Partial<CallRecord> = {};
+  if (body?.notes !== undefined) {
+    if (body.notes !== null && typeof body.notes !== 'string') throw new HttpError(400, 'notes must be a string.', 'BAD_REQUEST');
+    patch.notes = body.notes ? body.notes.slice(0, MAX_NOTES) : '';
+  }
+  if (body?.disposition !== undefined && body.disposition !== null) {
+    if (!DISPOSITIONS.includes(body.disposition)) throw new HttpError(400, `disposition must be one of ${DISPOSITIONS.join(', ')}`, 'BAD_REQUEST');
+    patch.disposition = body.disposition as Disposition;
+  }
+  return patch;
+}
 
 /**
  * Embed calls name the exact Twenty record they were placed from: { objectType, recordId }.
@@ -46,7 +67,7 @@ async function resolveTwentyRecord(twenty: unknown, e164: string): Promise<Conta
 /** Create a call record before dialing. Normalises the number; refuses to proceed if it can't. */
 callsRouter.post('/api/calls', async (req, res, next) => {
   try {
-    const { twentyContactId, contactName, phoneNumber, sessionId, repEmail, twenty } = req.body ?? {};
+    const { twentyContactId, contactName, phoneNumber, sessionId, repEmail, twenty, callerId } = req.body ?? {};
     if (twenty != null && twentyContactId != null) throw new HttpError(400, 'Send either twenty or twentyContactId, not both.', 'BAD_REQUEST');
     // twentyContactId is optional — a manual dial (typed on the keypad) has no CRM contact behind it.
     if (twentyContactId != null && typeof twentyContactId !== 'string') throw new HttpError(400, 'twentyContactId must be a string.', 'BAD_REQUEST');
@@ -54,9 +75,12 @@ callsRouter.post('/api/calls', async (req, res, next) => {
     const e164 = toE164(phoneNumber);
     if (!e164 || !isE164(e164)) throw new HttpError(400, `"${phoneNumber}" is not a valid phone number, so the call was not placed.`, 'INVALID_PHONE');
 
+    // Caller ID for this call only: the rep's pick if it's an active number on the account, else TELNYX_PHONE_NUMBER.
+    const fromNumber = await resolveCallerId(callerId);
+
     // Fetch Guard: re-read the contact from the source of truth (never trust the browser's copy).
     // Manual dials have no CRM record, so only the phone-based rules (internal DNC, calling hours) apply.
-    trace('POST /api/calls', { twenty: twenty ?? null, twentyContactId: twentyContactId ?? null, phone: last4(e164), repEmail: repEmail ?? null });
+    trace('POST /api/calls', { twenty: twenty ?? null, twentyContactId: twentyContactId ?? null, phone: last4(e164), callerId: last4(fromNumber), repEmail: repEmail ?? null });
     const record = twenty != null ? await resolveTwentyRecord(twenty, e164) : null;
     trace('POST /api/calls record', { resolved: record ? record.id : null, name: record?.name ?? null });
     const contact = record
@@ -74,6 +98,7 @@ callsRouter.post('/api/calls', async (req, res, next) => {
       twentyObjectType: record || twentyContactId ? ('person' as const) : null,
       contactName: record ? record.name : String(contactName || '').trim() || (twentyContactId ? '(no name)' : e164),
       phoneNumber: e164,
+      callerId: fromNumber,
       telnyxCallId: null,
       disposition: null,
       notes: null,
@@ -134,9 +159,25 @@ callsRouter.post('/api/calls/:id/status', async (req, res, next) => {
     if (started && ended) patch.durationSeconds = Math.max(0, Math.round((new Date(ended).getTime() - new Date(started).getTime()) / 1000));
     if (!started && ended) patch.durationSeconds = 0;
 
-    res.json({ call: await store.update(cur.id, patch) });
+    let call = await store.update(cur.id, patch);
+    if (status === 'connected' && config.recordingEnabled && !config.mockMode && call.telnyxCallId && !call.recordingStatus) {
+      call = await beginRecording(call);
+    }
+    res.json({ call });
   } catch (e) { next(e); }
 });
+
+/** record_start on the answered call. A failure is recorded on the call and never fails the status update. */
+async function beginRecording(call: CallRecord): Promise<CallRecord> {
+  try {
+    await startRecording(call.telnyxCallId!, call.id);
+    trace('recording started', { callId: call.id });
+    return await getStore().update(call.id, { recordingStatus: 'recording', recordingUrl: recordingPath(call.id) });
+  } catch (e: any) {
+    console.error(`[fetch:rec] record_start FAILED ${JSON.stringify({ callId: call.id, error: e.message })}`);
+    return await getStore().update(call.id, { recordingStatus: 'failed' });
+  }
+}
 
 /** Free-text notes, saved independently so they persist as the rep types, before disposition/logging. */
 callsRouter.post('/api/calls/:id/notes', async (req, res, next) => {
@@ -145,20 +186,24 @@ callsRouter.post('/api/calls/:id/notes', async (req, res, next) => {
     const cur = await store.get(req.params.id);
     if (!cur) throw new HttpError(404, 'Call not found.', 'CALL_NOT_FOUND');
     if (cur.twentyNoteId) throw new HttpError(409, 'This call is already logged to Twenty; notes can no longer be changed.', 'ALREADY_LOGGED');
-    const notes = typeof req.body?.notes === 'string' ? req.body.notes.slice(0, 4000) : '';
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes.slice(0, MAX_NOTES) : '';
     res.json({ call: await store.update(cur.id, { notes }) });
   } catch (e) { next(e); }
 });
 
+/** Body { disposition, notes? }. Allowed during the call too, so an outcome picked mid-call is never lost. */
 callsRouter.post('/api/calls/:id/disposition', async (req, res, next) => {
   try {
     const { disposition } = req.body ?? {};
     if (!DISPOSITIONS.includes(disposition)) throw new HttpError(400, `disposition must be one of ${DISPOSITIONS.join(', ')}`, 'BAD_REQUEST');
+    const patch = outcomePatch(req.body);
     const store = getStore();
     const cur = await store.get(req.params.id);
     if (!cur) throw new HttpError(404, 'Call not found.', 'CALL_NOT_FOUND');
     if (cur.twentyNoteId) throw new HttpError(409, 'This call is already logged to Twenty; its disposition can no longer be changed.', 'ALREADY_LOGGED');
-    const call = await store.update(cur.id, { disposition: disposition as Disposition });
+    if (cur.status === 'blocked') throw new HttpError(409, 'A call blocked by Fetch Guard has no outcome.', 'BLOCKED');
+    const call = await store.update(cur.id, patch);
+    trace('POST /disposition saved', { callId: cur.id, disposition: call.disposition, notesLength: call.notes?.length ?? 0 });
     // "Do Not Call" is a compliance event, not just a label: the number goes on the internal DNC list immediately.
     if (disposition === 'do_not_call') await addToDnc(cur.phoneNumber);
     res.json({ call, addedToDnc: disposition === 'do_not_call' });
@@ -169,12 +214,22 @@ callsRouter.post('/api/calls/:id/disposition', async (req, res, next) => {
  * Write the call to Twenty as a Note on the ORIGINAL contact ID.
  * Idempotent: a second call returns the existing note instead of creating a duplicate.
  * On failure the record keeps everything needed to retry (and stores the error).
+ * Body (optional): { notes, disposition } — saved onto the record first, so the note carries exactly
+ * what the rep had on screen when they logged.
  */
 callsRouter.post('/api/calls/:id/log', async (req, res, next) => {
   try {
     const store = getStore();
-    const cur = await store.get(req.params.id);
+    const patch = outcomePatch(req.body);
+    let cur = await store.get(req.params.id);
     if (!cur) throw new HttpError(404, 'Call not found.', 'CALL_NOT_FOUND');
+    if (!cur.twentyNoteId && cur.status === 'blocked') delete patch.disposition; // a blocked attempt is logged as such
+    if (!cur.twentyNoteId && Object.keys(patch).length) {
+      const wasDnc = cur.disposition === 'do_not_call';
+      cur = await store.update(cur.id, patch);
+      // Same compliance side effect as POST /disposition.
+      if (!wasDnc && cur.disposition === 'do_not_call') await addToDnc(cur.phoneNumber);
+    }
     trace('POST /log start', {
       callId: cur.id, status: cur.status, disposition: cur.disposition, twentyObjectType: cur.twentyObjectType,
       twentyContactId: cur.twentyContactId, notesLength: cur.notes?.length ?? 0, twentyNoteId: cur.twentyNoteId,
@@ -203,13 +258,15 @@ callsRouter.post('/api/calls/:id/log', async (req, res, next) => {
         target: { objectType: cur.twentyObjectType ?? 'person', recordId: cur.twentyContactId },
         contactName: cur.contactName,
         phoneNumber: cur.phoneNumber,
-        callerId: config.telnyx.phoneNumber || null,
+        callerId: cur.callerId || config.telnyx.phoneNumber || null,
         repEmail: cur.repEmail,
         durationSeconds: cur.durationSeconds ?? 0,
         disposition: cur.disposition,
         blockedReasons: cur.status === 'blocked' ? cur.blockedReasons : null,
         notes: cur.notes,
         telnyxCallId: cur.telnyxCallId,
+        // Usually logged before Telnyx delivers the file; the link is stable and works once it's saved.
+        recordingUrl: cur.recordingUrl && cur.recordingStatus !== 'failed' ? `${config.publicUrl || `${req.protocol}://${req.get('host')}`}${cur.recordingUrl}` : null,
         date: new Date(cur.endedAt ?? cur.createdAt),
       });
       trace('POST /log Twenty note created', { callId: cur.id, noteId, target: `${cur.twentyObjectType ?? 'person'} ${cur.twentyContactId}` });

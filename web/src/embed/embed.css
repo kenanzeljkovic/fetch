@@ -138,6 +138,15 @@
   padding: 5px 10px; border-radius: 8px; background: var(--input); color: var(--muted); font-size: 12px; margin-bottom: 12px;
 }
 .fd-callerid span { color: var(--text); font-weight: 500; }
+.fd-callerid { align-items: center; }
+.fd-callerid select {
+  font: inherit; color: var(--text); font-weight: 500; background: transparent; border: 0; padding: 0 2px; cursor: pointer;
+}
+.fd-callerid select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.fd-callerpick { margin-top: auto; display: flex; justify-content: flex-end; }
+.fd-callerpick .fd-callerid { margin-bottom: 8px; }
+.fd-callerpick + .fd-foot { margin-top: 0; }
+.fd-manual .fd-callerpick { justify-content: center; }
 
 .fd-blocked {
   padding: 10px 12px; border-radius: 10px; margin-bottom: 12px;
@@ -162,6 +171,8 @@
 .fd-logstatus { font-size: 12px; margin: -6px 0 12px; color: var(--muted); }
 .fd-logstatus[data-state="logged"] { color: var(--green); }
 .fd-logstatus[data-state="failed"] { color: var(--red); }
+.fd-logstatus { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.fd-logbtn { margin-left: auto; }
 .fd-error-block { margin: 0 0 12px; }
 .fd-notes:disabled { opacity: 0.6; }
 .fd-chip[data-on="1"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }

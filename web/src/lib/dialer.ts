@@ -18,7 +18,8 @@ export interface DialEvent {
 export interface Dialer {
   /** Connects/authenticates. Resolves when calls can be placed. */
   ready(): Promise<void>;
-  dial(destinationNumber: string, onEvent: (e: DialEvent) => void): Promise<void>;
+  /** callerNumber overrides the connection's default caller ID for this call only. */
+  dial(destinationNumber: string, onEvent: (e: DialEvent) => void, callerNumber?: string): Promise<void>;
   hangup(): Promise<void>;
   destroy(): void;
 }
@@ -88,7 +89,7 @@ export class TelnyxDialer implements Dialer {
     }
   }
 
-  async dial(destinationNumber: string, onEvent: (e: DialEvent) => void) {
+  async dial(destinationNumber: string, onEvent: (e: DialEvent) => void, callerNumber?: string) {
     this.onEvent = onEvent;
     this.wasActive = false;
     await this.ready();
@@ -99,7 +100,7 @@ export class TelnyxDialer implements Dialer {
       throw new Error('Microphone access was denied. Allow the microphone in your browser and try again.');
     }
     onEvent({ state: 'calling' });
-    this.call = this.client.newCall({ destinationNumber, callerNumber: this.callerNumber, audio: true, video: false } as any);
+    this.call = this.client.newCall({ destinationNumber, callerNumber: callerNumber || this.callerNumber, audio: true, video: false } as any);
   }
 
   async hangup() {

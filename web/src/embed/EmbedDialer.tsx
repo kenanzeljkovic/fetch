@@ -20,6 +20,7 @@ export interface EmbedContact {
   phone: string;
 }
 export interface Outcome { code: string; label: string; }
+export interface CallerIdOption { value: string; label: string; }
 export interface Stats { callsToday: number; connects: number; talkSeconds: number; }
 export interface LogStatus { state: 'pending' | 'logging' | 'logged' | 'local' | 'failed'; message: string; }
 
@@ -36,7 +37,9 @@ export interface EmbedDialerProps {
   onSelectQueue: (item: QueueItem) => void;
 
   contact: EmbedContact | null;
-  callerId?: string | null;
+  callerId?: string | null;                // the number this call is (or will be) placed from
+  callerIdOptions?: CallerIdOption[];      // empty/omitted = no picker, just show callerId
+  onCallerIdChange?: (value: string) => void;
   callState: CallState;
   seconds: number;
   blockedDetail?: string[];
@@ -51,6 +54,7 @@ export interface EmbedDialerProps {
   outcomesDisabled?: boolean;
   confirmOutcome?: string | null;          // outcome waiting for its confirming second click
   logStatus?: LogStatus | null;
+  onLogOutcome?: () => void;               // commits the selected outcome (shown while logStatus is pending)
 
   onCall: () => void;
   onHangup: () => void;
@@ -210,8 +214,6 @@ function CallView(p: EmbedDialerProps & { active: boolean }) {
               </div>
             </div>
 
-            <div className="fd-callerid">Caller ID <span>{p.callerId ? formatPhone(p.callerId) : '—'}</span></div>
-
             {p.error && p.callState !== 'blocked' && <div className="fd-error fd-error-block" role="alert">{p.error}</div>}
 
             {p.callState === 'blocked' && (
@@ -251,8 +253,15 @@ function CallView(p: EmbedDialerProps & { active: boolean }) {
             {p.logStatus && (
               <div className="fd-logstatus" data-state={p.logStatus.state} role={p.logStatus.state === 'failed' ? 'alert' : 'status'}>
                 {p.logStatus.message}
+                {p.onLogOutcome && p.outcome && (
+                  <button type="button" className="fd-btn fd-btn-primary fd-btn-sm fd-logbtn" onClick={p.onLogOutcome}>
+                    {p.contact?.id ? 'Log' : 'Save'} as {p.outcomes.find((o) => o.code === p.outcome)?.label ?? p.outcome}
+                  </button>
+                )}
               </div>
             )}
+
+            <CallerIdPicker {...p} locked={p.active || p.callState === 'checking'} />
 
             <div className="fd-foot">
               <div className="fd-upnext">
@@ -283,6 +292,28 @@ function CallView(p: EmbedDialerProps & { active: boolean }) {
           </>
         )}
       </section>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ caller ID */
+
+/** Small "Call from" picker above the Call button. Locked while a call is live: it shows the number in use. */
+function CallerIdPicker(p: EmbedDialerProps & { locked: boolean }) {
+  const options = p.callerIdOptions || [];
+  const canPick = !p.locked && options.length > 1 && !!p.onCallerIdChange;
+  return (
+    <div className="fd-callerpick">
+      <label className="fd-callerid" htmlFor={canPick ? 'fd-callerid-select' : undefined}>
+        Call from
+        {canPick ? (
+          <select id="fd-callerid-select" value={p.callerId || ''} onChange={(e) => p.onCallerIdChange!(e.target.value)}>
+            {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        ) : (
+          <span>{p.callerId ? formatPhone(p.callerId) : '—'}</span>
+        )}
+      </label>
     </div>
   );
 }
@@ -327,6 +358,8 @@ function ManualDial(p: EmbedDialerProps) {
       </div>
 
       {p.manualError && <div className="fd-error" role="alert">{p.manualError}</div>}
+
+      <CallerIdPicker {...p} locked={p.callState === 'checking' || p.callState === 'dialing' || p.callState === 'ringing' || p.callState === 'connected'} />
 
       <button type="button" className="fd-btn fd-btn-primary fd-wide" disabled={!valid} onClick={p.onManualCall}>
         Call this number

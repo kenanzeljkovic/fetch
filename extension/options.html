@@ -33,6 +33,7 @@
     #micStatus { color: var(--muted); }
     #micStatus.ok { color: var(--green); }
     #micStatus.err { color: var(--red); }
+    .hint.err { color: var(--red); }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -56,6 +57,12 @@
       <label for="repEmail">Your email</label>
       <input id="repEmail" type="email" placeholder="you@company.com" />
       <div class="hint">Used for Guard permissions and to attribute calls to you.</div>
+
+      <label for="defaultCallerId">Default caller ID</label>
+      <select id="defaultCallerId">
+        <option value="">Server default</option>
+      </select>
+      <div class="hint" id="callerIdHint">The number prospects see. You can still switch it per call in the dialer.</div>
 
       <label for="theme">Appearance</label>
       <select id="theme">

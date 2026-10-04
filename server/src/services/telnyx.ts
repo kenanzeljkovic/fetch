@@ -11,12 +11,10 @@
 import { config } from '../config';
 import { HttpError } from '../lib/errors';
 
-const API = 'https://api.telnyx.com/v2';
-
-async function telnyxFetch(path: string, init: RequestInit = {}) {
+export async function telnyxFetch(path: string, init: RequestInit = {}) {
   let res: Response;
   try {
-    res = await fetch(`${API}${path}`, {
+    res = await fetch(`${config.telnyx.apiBase}${path}`, {
       ...init,
       headers: { Authorization: `Bearer ${config.telnyx.apiKey}`, 'Content-Type': 'application/json', ...(init.headers || {}) },
     });
@@ -58,4 +56,64 @@ export async function createLoginToken(): Promise<string> {
   }
   // The token endpoint returns the JWT as plain text; some clients wrap it in JSON.
   try { const j = JSON.parse(text); return j?.data?.token ?? j?.token ?? text; } catch { return text.trim(); }
+}
+
+export interface TelnyxNumber {
+  phoneNumber: string;            // E.164
+  connectionId: string | null;
+  connectionName: string | null;
+  tags: string[];
+}
+
+const NUMBERS_TTL_MS = 60_000;
+let numbersCache: { at: number; numbers: TelnyxNumber[] } | null = null;
+
+/**
+ * Active numbers on the Telnyx account — the only numbers a rep may pick as caller ID.
+ * Cached for a minute: the options page, every dock, and every POST /api/calls read it.
+ */
+export async function listPhoneNumbers(): Promise<TelnyxNumber[]> {
+  if (numbersCache && Date.now() - numbersCache.at < NUMBERS_TTL_MS) return numbersCache.numbers;
+  const res = await telnyxFetch('/phone_numbers?filter[status]=active&page[size]=250');
+  const json: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = json?.errors?.map((e: any) => e.detail || e.title).join('; ') || res.statusText;
+    throw new HttpError(502, `Telnyx could not list phone numbers: ${detail}`, 'TELNYX_NUMBERS');
+  }
+  const numbers: TelnyxNumber[] = (Array.isArray(json?.data) ? json.data : [])
+    .filter((n: any) => typeof n?.phone_number === 'string')
+    .map((n: any) => ({
+      phoneNumber: n.phone_number,
+      connectionId: n.connection_id ? String(n.connection_id) : null,
+      connectionName: n.connection_name ?? null,
+      tags: Array.isArray(n.tags) ? n.tags : [],
+    }));
+  numbersCache = { at: Date.now(), numbers };
+  return numbers;
+}
+
+// MOCK MODE — fake numbers so the caller ID picker can be clicked through without credentials.
+const MOCK_NUMBERS: TelnyxNumber[] = [
+  { phoneNumber: '+10000000000', connectionId: 'mock', connectionName: 'Mock connection', tags: [] },
+  { phoneNumber: '+10000000001', connectionId: 'mock', connectionName: 'Mock connection', tags: [] },
+];
+
+/** Numbers a rep may use as caller ID, plus the server default (TELNYX_PHONE_NUMBER). */
+export async function callerIdOptions(): Promise<{ numbers: TelnyxNumber[]; defaultNumber: string }> {
+  if (config.mockMode) return { numbers: MOCK_NUMBERS, defaultNumber: MOCK_NUMBERS[0].phoneNumber };
+  return { numbers: await listPhoneNumbers(), defaultNumber: config.telnyx.phoneNumber };
+}
+
+/**
+ * The caller ID for one call: the rep's pick if it is an active number on this Telnyx account,
+ * otherwise TELNYX_PHONE_NUMBER. A number that isn't ours is refused rather than silently swapped,
+ * so the rep never believes they called from a number they didn't.
+ */
+export async function resolveCallerId(requested: unknown): Promise<string> {
+  const { numbers, defaultNumber } = await callerIdOptions();
+  if (requested == null || requested === '' || requested === defaultNumber) return defaultNumber;
+  if (typeof requested !== 'string' || !numbers.some((n) => n.phoneNumber === requested)) {
+    throw new HttpError(400, `${String(requested)} is not an active number on this Telnyx account, so it can't be used as caller ID.`, 'INVALID_CALLER_ID');
+  }
+  return requested;
 }
